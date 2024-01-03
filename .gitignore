@@ -1,3 +1,4 @@
 /target
 Cargo.lock
 cached_all_tracks.json
+.spotify_token_cache.json
