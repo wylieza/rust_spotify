@@ -1,5 +1,7 @@
+use async_recursion::async_recursion;
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
+use regex::Regex;
 use rspotify::model::playlist::PlaylistTracksRef;
 use rspotify::model::{
     FullPlaylist, FullTrack, Page, PlayableItem, PlaylistId, PlaylistItem, PublicUser,
@@ -123,6 +125,7 @@ async fn main() {
     println!("tracks we must add: {}", tracks_to_add.len());
 
     add_to_playlist(&spotify, &recent_onehundred_id, &tracks_to_add).await;
+    remove_from_playlist(&spotify, &recent_onehundred_id, &tracks_to_remove).await;
 }
 
 async fn user_playlists(spotify: &AuthCodeSpotify) -> Vec<SimplifiedPlaylist> {
@@ -149,6 +152,84 @@ async fn user_playlists(spotify: &AuthCodeSpotify) -> Vec<SimplifiedPlaylist> {
     return user_playlists;
 }
 
+#[async_recursion]
+async fn get_all_playable_tracks(
+    spotify: &AuthCodeSpotify,
+    tracks: &Page<PlaylistItem>,
+) -> Vec<PlaylistTrack> {
+    let mut playlist_tracks: Vec<PlaylistTrack> = tracks
+        .items
+        .iter()
+        .map(|playlist_item| PlaylistTrack {
+            added_at: playlist_item.added_at.clone(),
+            added_by: playlist_item.added_by.clone(),
+            is_local: playlist_item.is_local,
+            track: if let Some(playable_item) = &playlist_item.track {
+                match playable_item {
+                    PlayableItem::Track(track) => Some(track.clone()),
+                    PlayableItem::Episode(_) => None,
+                }
+            } else {
+                None
+            },
+        })
+        .collect();
+
+    if let Some(next_href) = &tracks.next {
+        println!("recursing to get next page!");
+
+        let re_capture_id = Regex::new(r"/playlists/([a-zA-Z0-9]+)").unwrap();
+        let re_capture_offset = Regex::new(r"offset=([0-9]+)").unwrap();
+        let re_capture_limit = Regex::new(r"limit=([0-9]+)").unwrap();
+
+        let next_id = re_capture_id
+            .captures(&next_href)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str();
+        let next_offset = re_capture_offset
+            .captures(&next_href)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str()
+            .parse::<u32>()
+            .unwrap();
+        let next_limit = re_capture_limit
+            .captures(&next_href)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .as_str()
+            .parse::<u32>()
+            .unwrap();
+
+        playlist_tracks.extend(
+            get_all_playable_tracks(
+                &spotify,
+                &spotify
+                    .playlist_items_manual(
+                        PlaylistId::from_id(next_id).unwrap(),
+                        None,
+                        None,
+                        Some(next_limit),
+                        Some(next_offset),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .clone(),
+        );
+        return playlist_tracks;
+    } else {
+        println!("no next page!");
+    }
+
+    return playlist_tracks;
+}
+
 async fn get_tracks(
     spotify: &AuthCodeSpotify,
     playlist: &SimplifiedPlaylist,
@@ -161,40 +242,6 @@ async fn get_tracks(
     } else {
         return Vec::<PlaylistTrack>::new();
     }
-}
-
-async fn get_all_playable_tracks(
-    spotify: &AuthCodeSpotify,
-    tracks: &Page<PlaylistItem>,
-) -> Vec<PlaylistTrack> {
-    let playlist_tracks = tracks
-        .items
-        .iter()
-        .map(|playlist_item| {
-            PlaylistTrack {
-                added_at: playlist_item.added_at.clone(),
-                added_by: playlist_item.added_by.clone(),
-                is_local: playlist_item.is_local,
-                track: if let Some(playable_item) = &playlist_item.track {
-                    match playable_item {
-                    PlayableItem::Track(track) => Some(track.clone()),
-                    PlayableItem::Episode(_) => None,
-                    }
-                } else {
-                    None
-                },
-            }
-        })
-        .collect();
-
-    if let Some(next_page) = &tracks.next {
-        dbg!(next_page);
-        // let next_tracks = next_page;
-    } else {
-        println!("no next page!");
-    }
-
-    return playlist_tracks;
 }
 
 async fn get_tracks_with_playlist_id(
@@ -279,12 +326,32 @@ fn remove_tracks(tracks: &mut Vec<PlaylistTrack>, removal_list: &Vec<PlaylistTra
     });
 }
 
-fn remove_from_playlist(
+// the remove_from_playlist and add_to_playlist are technically the same logic with different api call - TODO: combine functionality
+async fn remove_from_playlist(
     spotify: &AuthCodeSpotify,
-    playlist_id: &PlaylistId,
+    playlist_id: &PlaylistId<'_>,
     tracks: &Vec<PlaylistTrack>,
 ) {
-    // api calls to remove from the recent one hundred playlist
+    if tracks.len() == 0 {
+        return;
+    }
+
+    let track_ids: Vec<rspotify::model::PlayableId> = tracks
+        .iter()
+        .map(|track| PlayableId::Track(track.track.as_ref().unwrap().id.as_ref().unwrap().clone()))
+        .collect();
+
+    match spotify
+        .playlist_remove_all_occurrences_of_items(playlist_id.clone(), track_ids, None)
+        .await
+    {
+        Ok(result) => {
+            println!("tracks removed from playlist successfully!");
+        }
+        Err(error) => {
+            dbg!(error);
+        }
+    }
 }
 
 async fn add_to_playlist(
