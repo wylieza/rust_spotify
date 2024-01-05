@@ -2,22 +2,16 @@ use async_recursion::async_recursion;
 use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
 use regex::Regex;
-use rspotify::model::playlist::PlaylistTracksRef;
 use rspotify::model::{
-    FullPlaylist, FullTrack, Page, PlayableItem, PlaylistId, PlaylistItem, PublicUser,
-    SimplifiedPlaylist, UserId,
+    FullTrack, Page, PlayableItem, PlaylistId, PlaylistItem, PublicUser, SimplifiedPlaylist, UserId,
 };
-use rspotify::{
-    prelude::*, scopes, AuthCodeSpotify, ClientCredsSpotify, ClientError, Config, Credentials,
-    OAuth,
-};
+use rspotify::{prelude::*, scopes, AuthCodeSpotify, Config, Credentials, OAuth};
 
 // local caching to speed up development
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 
-use std::collections::HashSet;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PlaylistTrack {
     pub added_at: Option<DateTime<Utc>>,
@@ -46,9 +40,6 @@ async fn main() {
     ))
     .unwrap(); // for now I am excluding private playlists "playlist-read-private"
 
-    // let spotify: ClientCredsSpotify = ClientCredsSpotify::new(creds); // no user specific actions available
-    // spotify.request_token().await.unwrap();
-
     let mut config = Config::default();
     config.token_cached = true;
 
@@ -58,20 +49,6 @@ async fn main() {
     let url = spotify.get_authorize_url(false).unwrap();
     spotify.prompt_for_token(&url).await.unwrap();
 
-    // token caching
-    // let token_available = spotify.read_token_cache(false).await;
-    // match token_available {
-    //     Ok(token) => {
-    //         println!("cached token available: {:?}", token.unwrap());
-    //         spotify.get_oauth();
-    //     },
-    //     Err(error) => {
-    //         dbg!(error);
-    //         let url = spotify.get_authorize_url(false).unwrap();
-    //         spotify.prompt_for_token(&url).await.unwrap();
-    //     },
-    // }
-
     // collect all user tracks
     let mut all_tracks = get_all_user_tracks(&spotify).await;
     println!("all user tracks total: {}", all_tracks.len());
@@ -80,7 +57,7 @@ async fn main() {
     all_tracks.sort_by(|a, b| b.added_at.unwrap().cmp(&a.added_at.unwrap()));
     println!("first track: {}", all_tracks[0].added_at.unwrap());
 
-    // remove duplicates (same track added to different playlists)
+    // remove duplicates (same tracks added to multiple playlists)
     let mut track_name_seen = std::collections::HashSet::new();
     all_tracks.retain(|track| {
         if let Some(track) = track.track.as_ref() {
@@ -88,13 +65,6 @@ async fn main() {
                 return track_name_seen.insert(track_id.clone());
             }
         }
-
-        // some helpful debug info surrounding troublesome tracks
-        // if let Some(track_track) = &track.track {
-        //     dbg!(track_track);
-        // } else {
-        //     dbg!(&track.is_local);
-        // }
 
         // we remove any tracks for which we cannot retrive an ID
         false
@@ -108,16 +78,11 @@ async fn main() {
         .map(|track| track.clone())
         .collect();
 
-    // print these track names
-    // for track in &recent_onehundred {
-    //     println!("{}", track.track.as_ref().unwrap().name);
-    // }
-
+    // pull current recent onehundred playlist and determine add/remove operations
     let current_recent_onehundred_tracks =
         get_tracks_with_playlist_id(&spotify, &recent_onehundred_id).await;
     let mut tracks_to_remove = current_recent_onehundred_tracks.clone();
     let mut tracks_to_add = recent_onehundred.clone();
-
     remove_tracks(&mut tracks_to_remove, &recent_onehundred); // remaining in tracks_to_remove are the tracks we must ask spotify to remove from the recent 100 playlist
     remove_tracks(&mut tracks_to_add, &current_recent_onehundred_tracks); // remaining in recent_onehundred are the tracks we must ask spotify to add to the recent 100 playlist
 
@@ -284,19 +249,7 @@ async fn get_all_user_tracks(spotify: &AuthCodeSpotify) -> Vec<PlaylistTrack> {
 
         #[cfg(feature = "cache_new_results")]
         {
-            let all_tracks = Tracks {
-                list: all_user_tracks,
-            };
-
-            let file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open("cached_all_tracks.json")
-                .unwrap();
-            serde_json::to_writer(file, &all_tracks).unwrap();
-            all_user_tracks = all_tracks.list;
-            println!("all tracks have been cached to disk");
+            cache_playlist_tracks(&all_user_tracks, None);
         }
     }
 
@@ -310,6 +263,26 @@ async fn get_all_user_tracks(spotify: &AuthCodeSpotify) -> Vec<PlaylistTrack> {
     }
 
     return all_user_tracks;
+}
+
+fn cache_playlist_tracks(tracks_list: &Vec<PlaylistTrack>, file_name: Option<String>) {
+    let all_tracks = Tracks {
+        list: tracks_list.clone(),
+    };
+
+    let file_name: String = match file_name {
+        Some(file_name) => file_name,
+        None => "cached_all_tracks".to_string(),
+    };
+
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(format!("{}.json", file_name))
+        .unwrap();
+    serde_json::to_writer(file, &all_tracks).unwrap();
+    println!("all tracks have been cached to disk");
 }
 
 fn remove_tracks(tracks: &mut Vec<PlaylistTrack>, removal_list: &Vec<PlaylistTrack>) {
@@ -369,7 +342,7 @@ async fn add_to_playlist(
         .collect();
 
     match spotify
-        .playlist_add_items(playlist_id.clone(), track_ids, None)
+        .playlist_add_items(playlist_id.clone(), track_ids, Some(0))
         .await
     {
         Ok(result) => {
