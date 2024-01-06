@@ -6,6 +6,7 @@ This is aimed at being both functional (meeting a specific need I have) and a le
 exposure to the rust language).
 
 ## Latest 100 playlist
+**The apporach of downloading everything each time the program runs does not work. The API limit is reached.**
 I would like to have a playlist which is kept up to date with the most recent 100 songs I have collected.
 Essentially, regardless of which playlist I add a new song, the 'latest 100 playlist' will be updated to
 contain this new track.
